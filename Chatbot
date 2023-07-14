@@ -1,0 +1,190 @@
+import vk_api
+from vk_api.longpoll import VkLongPoll, VkEventType
+from vk_api.utils import get_random_id
+from datetime import datetime
+from vk_api.exceptions import ApiError
+from vk_api import VkTools
+
+
+import sqlalchemy as sq
+from sqlalchemy.orm import declarative_base
+from sqlalchemy import create_engine, MetaData
+from sqlalchemy.orm import Session
+
+
+
+comunity_token = ''
+acces_token = ''
+database = ''
+
+
+class BotInterface():
+    def __init__(self, acces_token, comunity_token):
+        self.bot = vk_api.VkApi(token=comunity_token)
+        self.api = VkTools(acces_token)
+        self.params = None
+
+    def message_send(self, user_id, message, attachment=None):
+        self.bot.method('messages.send',
+                       {'user_id': user_id,
+                        'random_id': get_random_id(),
+                        'attachment': attachment,
+                       })
+
+    def handler(self):
+        longpull = VkLongPoll(self.bot)
+        
+        for event in longpull.listen():
+            if event.type == VkEventType.MESSAGE_NEW and event.to_me:
+                message = event.text.lower()
+
+                if message == 'привет':
+                    self.params = self.api.get_profile_info(event.user_id)
+                    self.message_send(event.user_id, f'привет {self.params["name"]}')
+                elif message == 'поиск':
+                    self.message_send(event.user_id, f'Начинаем поиск')
+                    def questionnaries():
+                        users = self.api.serch_users(self.params)
+                        user = users.pop()
+                        return user
+                    # проверка базы данных
+                    saved_profiles = check_user()
+                    while saved_profiles == True:
+                       questionnaries()
+
+                    photos_user = self.api.get_photos(user['id'])
+
+                    attachment = ''
+                    for num, photo in enumerate(photos_user):
+                        attachment += f'photo{photo["owner_id"]}_{photo["id"]}'
+                        if num == 2:
+                            break
+                    self.message_send(event.user_id,
+                                      f'Встречайте {user["name"]} ссылка: vk.com/{user["id"]}'
+                                      attachment=attachment
+                                      )
+                    # запись в базу данных
+                   add_user()
+                elif message == 'пока':
+                    self.message_send(event.user_id, 'всего доброго')
+                else:
+                    self.message_send(event.user_id, 'неизвестная команда')
+
+
+
+
+class VKTools():
+    def __init__(self, acces_token):
+        self.api = vk_api.VkApi(token=acces_token)
+
+    def get_profile_info(self, user_id):
+        try:
+            info, = self.api.method('users.get',
+                                {'user_id': user_id,
+                                'fields': 'city, bdate, sex, relation,'
+                                })
+        except ApiError:
+            return
+
+        user_info = {'name': info['first_name'] + ' ' + info['last_name'],
+                    'id': info['id'],
+                    'bdate': info['bdate'] if 'bdate' in info else None,
+                    'relation': info['relation'],
+                    'sex': info['sex'],
+                    'city': info['city']['id']
+                    }
+        if user_info['bdate'] == None:
+            user_info['bdate'] = int(input('Введите дату рождения'))
+        if user_info['sex']  == None:
+            user_info['sex'] = int(input('Введите свой пол'))
+        if user_info['city'] == None:
+            user_info['city'] = str(input('Введите город проживания'))
+        return user_info
+
+    def serch_users(self, params):
+
+        sex = 1 if params['sex'] == 2 else 2
+        city = params['city']
+        curent_year = datetime.now().year
+        user_year = int(params['bdate'].split('.')[2])
+        age = curent_year - user_year
+        age_from = age - 3
+        age_to = age + 3
+        relation = params['relation']
+
+        users = self.api.method('users.search',
+                                {'count': 50,
+                                'offset': 50,
+                                'age_from': age_from,
+                                'age_to': age_to,
+                                'sex': sex,
+                                'city': city,
+                                'relation': relation,
+                                'is_closed': False
+                                })
+        try:
+            users = users['items']
+        except ApiError:
+            return []
+
+        res = []
+
+        for user in users:
+            if user['is_closed'] == False:
+                res.append({'id': user['id'],
+                            'name': user['first_name'] + ' ' + user['last_name']
+                            }
+                           )
+
+        return res
+
+    def get_photos(self, user_id):
+        photos = self.api.method('photos.get',
+                                 {'user_id': user_id,
+                                 'album_id': 'profile',
+                                 'extended': 1
+                                 })
+        try:
+            photos = photos['items']
+        except ApiError:
+            return []
+
+        res = []
+
+        for photo in photos:
+            res.append({'owner_id': photo['owner_id'],
+                       'id': photo['id'],
+                       'likes': photo['likes']['count'],
+                       'comments': photo['comments']['count'],
+                       })
+
+        res.sort(key=lambda x: x['likes'] + x['comments'] * 10, reverse=True)
+
+        return res
+
+
+
+
+metadata = MetaData()
+Base = declarative_base()
+
+class Viewed(Base):
+    __tablename__ = 'viewed'
+    profile_id = sq.Column(sq.Integer, primary_key=True)
+    worksheet_id = sq.Column(sq.Integer, primary_key=True)
+ добавление записи в бд
+
+   def add_user():
+        engine = create_engine(database)
+        Base.metadata.create_all(engine)
+        with Session(engine) as session:
+            to_bd = Viewed(profile_id = user_id, worksheet_id = user['id'])
+            session.add(to_bd)
+           session.commit()
+
+ извлечение записей из БД
+   def check_user():
+        engine = create_engine(database)
+        with Session(engine) as session:
+            from_bd = session.query(Viewed).filter(Viewed.profile_id == user_id, Viewed.worksheet_id == user['id']).first()
+            return True if from_bd else Fals
